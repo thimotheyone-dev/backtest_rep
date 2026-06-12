@@ -2,12 +2,7 @@ import streamlit as st
 import pandas as pd
 from pathlib import Path
 
-from backtest import (
-    read_symbols,
-    build_param_grid,
-    load_ohlcv,
-    process_symbol,
-)
+from backtest import read_symbols, build_param_grid, process_symbol
 
 st.set_page_config(page_title="BIST Backtest", layout="wide")
 st.title("📊 BIST Backtest")
@@ -24,6 +19,7 @@ run_btn = st.sidebar.button("Backtest çalıştır")
 
 if run_btn:
     symbols_path = Path(symbols_file)
+
     if not symbols_path.exists():
         st.error(f"Sembol dosyası bulunamadı: {symbols_path.resolve()}")
         st.stop()
@@ -68,28 +64,59 @@ if run_btn:
     status_box = st.empty()
 
     all_results = []
+    trade_rows = []
 
     for i, symbol in enumerate(symbols, start=1):
         status_box.write(f"İşleniyor: {symbol} ({i}/{len(symbols)})")
 
-        result = process_symbol(
-            symbol=symbol,
-            period=period,
-            interval=interval,
-            cache_dir=Path("cache"),
-            param_grid=param_grid,
-            train_size=504,
-            test_size=126,
-            step_size=126,
-        )
+        try:
+            returned = process_symbol(
+                symbol=symbol,
+                period=period,
+                interval=interval,
+                cache_dir=Path("cache"),
+                param_grid=param_grid,
+                train_size=504,
+                test_size=126,
+                step_size=126,
+            )
+
+            # process_symbol bazen (symbol, dict) döndürüyor
+            if isinstance(returned, tuple) and len(returned) == 2:
+                _, result = returned
+            else:
+                result = returned
+
+            if not isinstance(result, dict):
+                result = {
+                    "status": "unexpected_result",
+                    "train_summary": pd.DataFrame(),
+                    "fold_summary": pd.DataFrame(),
+                    "oos_trades": pd.DataFrame(),
+                }
+
+        except Exception as e:
+            result = {
+                "status": f"error: {e}",
+                "train_summary": pd.DataFrame(),
+                "fold_summary": pd.DataFrame(),
+                "oos_trades": pd.DataFrame(),
+            }
 
         all_results.append(
             {
                 "symbol": symbol,
-                "status": result["status"],
-                "best_params": result["train_summary"].iloc[0].to_dict() if not result["train_summary"].empty else None,
+                "status": result.get("status", "unknown"),
+                "folds": len(result["fold_summary"]) if isinstance(result.get("fold_summary"), pd.DataFrame) else 0,
+                "train_rows": len(result["train_summary"]) if isinstance(result.get("train_summary"), pd.DataFrame) else 0,
+                "oos_trades": len(result["oos_trades"]) if isinstance(result.get("oos_trades"), pd.DataFrame) else 0,
             }
         )
+
+        if isinstance(result.get("oos_trades"), pd.DataFrame) and not result["oos_trades"].empty:
+            ot = result["oos_trades"].copy()
+            ot.insert(0, "symbol", symbol)
+            trade_rows.append(ot)
 
         progress.progress(i / len(symbols))
 
@@ -98,7 +125,18 @@ if run_btn:
     st.subheader("Tarama Sonuçları")
     st.dataframe(df_results, use_container_width=True)
 
-    ok_count = (df_results["status"] == "ok").sum()
+    ok_count = (df_results["status"] == "ok").sum() if not df_results.empty else 0
     st.success(f"Tarama tamamlandı. Uygun veri bulunan hisse sayısı: {ok_count}")
+
+    if trade_rows:
+        st.subheader("OOS Trade Kayıtları")
+        df_trades = pd.concat(trade_rows, ignore_index=True)
+        st.dataframe(df_trades, use_container_width=True)
+        st.download_button(
+            "OOS trade CSV indir",
+            data=df_trades.to_csv(index=False).encode("utf-8"),
+            file_name="oos_trades.csv",
+            mime="text/csv",
+        )
 else:
     st.info("Sol menüden ayar yapıp **Backtest çalıştır** butonuna basın.")
